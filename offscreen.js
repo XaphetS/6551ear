@@ -23,20 +23,6 @@
   let settings = { ...DEFAULTS };
   let lastStatus = { hooked: false, lastNews: null };
 
-  // 语音列表缓存（getVoices 是异步加载的，首次调用常返回空数组，必须预加载并监听变化）
-  let cachedVoices = [];
-  function loadVoices() {
-    try {
-      if (typeof speechSynthesis === 'undefined') return;
-      const v = speechSynthesis.getVoices();
-      if (v && v.length) cachedVoices = v.slice();
-    } catch (e) {}
-  }
-  if (typeof speechSynthesis !== 'undefined') {
-    loadVoices();
-    speechSynthesis.addEventListener('voiceschanged', loadVoices);
-  }
-
   // 去重集合（newsId）
   const seenIds = new Set();
   const SEEN_MAX = 800;
@@ -251,43 +237,52 @@
     const stored = await getStoredAudio();
     const rate = overrideRate != null ? Number(overrideRate) : stored.rate;
     const volume = stored.volume;
-    console.log('[NewsLiquid播报] 使用浏览器语音 rate=', rate, 'volume=', volume);
-    const r = speakWithSpeechSynthesis(text, rate, volume);
-    if (r.ok) {
+    const r = await speakWithSpeechSynthesis(text, rate, volume);
+    if (r && r.ok) {
       return { ok: true, engine: 'speechSynthesis', rate, voice: r.voiceName, error: '' };
     }
     playBeep();
-    return { ok: false, error: r.error || '浏览器语音不可用' };
+    return { ok: false, error: (r && r.error) || '浏览器语音不可用' };
   }
 
-  // 浏览器原生 speechSynthesis（零延迟，语速可达 2.0 倍以上）
-  function speakWithSpeechSynthesis(text, rate, volume) {
+  // 等待声音列表就绪（getVoices 在 offscreen 里首次常返回空，必须等 voiceschanged 或超时）
+  function waitVoices() {
+    return new Promise((resolve) => {
+      const now = speechSynthesis.getVoices();
+      if (now && now.length) {
+        resolve(now);
+        return;
+      }
+      const timer = setTimeout(() => resolve(speechSynthesis.getVoices() || []), 1500);
+      speechSynthesis.addEventListener('voiceschanged', () => {
+        clearTimeout(timer);
+        resolve(speechSynthesis.getVoices() || []);
+      }, { once: true });
+    });
+  }
+
+  // 浏览器原生 speechSynthesis（零延迟，语速 0.5~2.5 倍）
+  async function speakWithSpeechSynthesis(text, rate, volume) {
     try {
       if (typeof speechSynthesis === 'undefined' || !speechSynthesis.speak) return { ok: false, error: 'speechSynthesis 不可用' };
+      const voices = await waitVoices();
+      const zh = (voices || []).filter(v => v && /^zh/i.test(v.lang || ''));
+      // 锁定 Google 普通话（微软 Huihui/Kangkang/Yaoyao 对语速不响应，当摆设跳过）
+      const pick =
+        zh.find(v => /google/i.test(v.name || '') && /普通话|中国大陆|zh-CN/i.test((v.name || '') + (v.lang || ''))) ||
+        zh.find(v => /google/i.test(v.name || '')) ||
+        zh[0] ||
+        null;
+
       const u = new SpeechSynthesisUtterance(String(text));
       u.lang = 'zh-CN';
-      // 直接使用传入的语速倍数（1.0=正常，2.0=2倍速，最快可到 10）
-      u.rate = Math.max(0.5, Math.min(10, Number(rate) || 2.0));
+      if (pick) u.voice = pick;
+      u.rate = Math.max(0.5, Math.min(2.5, Number(rate) || 1));
       u.pitch = 1;
       u.volume = Math.max(0, Math.min(Number(volume) || 1, 1));
-
-      // 用缓存的 voices 选中文语音（getVoices 已预加载，避免首次返回空）
-      let voiceName = '';
-      const voices = cachedVoices.length ? cachedVoices : speechSynthesis.getVoices();
-      const zh = voices.filter(v => /^zh/i.test(v.lang || ''));
-      if (zh.length) {
-        // 优先 Google 普通话（对 2 倍以上语速支持最好），其次大陆普通话，再任意中文
-        const pick = zh.find(v => /google/i.test(v.name) && /zh-CN|cmn|Mandarin|zh_CN/i.test(v.lang))
-          || zh.find(v => /google/i.test(v.name))
-          || zh.find(v => /zh-CN|cmn|Mandarin|zh_CN/i.test(v.lang))
-          || zh.find(v => /中文|Chinese|普通话/i.test(v.name))
-          || zh[0];
-        u.voice = pick;
-        voiceName = pick.name + ' (' + pick.lang + ')';
-      }
       speechSynthesis.cancel();
       speechSynthesis.speak(u);
-      return { ok: true, voiceName: voiceName || '系统默认' };
+      return { ok: true, voiceName: pick ? (pick.name + ' (' + pick.lang + ')') : '系统默认' };
     } catch (e) {
       return { ok: false, error: String(e && e.message ? e.message : e) };
     }
