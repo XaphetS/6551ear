@@ -67,4 +67,4 @@ Chrome 扩展：劫持 [NewsLiquid](https://app.newsliquid.com/trade) 页面的�
 
 ## 版本
 
-- `manifest.json` 版本 `0.5.2`（schemaVersion 9）
+- `manifest.json` 版本 `0.5.3`（schemaVersion 9）

@@ -38,43 +38,21 @@
   }
 
   // ---------- 设置 ----------
-  function loadSettings(cb) {
-    // 部分 Chrome 的 offscreen 文档没有 chrome.storage（只有 chrome.runtime），加防护避免启动即崩
-    if (!chrome.storage || !chrome.storage.local) {
-      settings = { ...DEFAULTS };
-      if (cb) cb();
-      return;
-    }
-    try {
-      chrome.storage.local.get(null, (res) => {
-        const stored = res || {};
-        // 版本迁移：旧扩展的 storage 里存着旧语速/旧音色，会覆盖新默认值。
-        // schemaVersion 不一致时，强制用最新默认值。
-        if (stored.schemaVersion !== DEFAULTS.schemaVersion) {
-          settings = { ...DEFAULTS };
-          try { chrome.storage.local.set(settings); } catch (e) {}
-        } else {
-          settings = { ...DEFAULTS, ...stored };
-        }
-        if (typeof settings.volume !== 'number') settings.volume = 1.0;
-        if (cb) cb();
-      });
-    } catch (e) {
-      settings = { ...DEFAULTS };
-      if (cb) cb();
-    }
-  }
+  // 注意：offscreen 文档在部分 Chrome 里没有 chrome.storage（只有 chrome.runtime）。
+  // 因此设置不再由 offscreen 读 storage，而是由 background（Service Worker）读好后
+  // 塞进 NEWS_SCORED / TEST_SPEAK 消息里传进来。settings 变量仅作兜底默认值。
 
   // ---------- 新闻处理 ----------
-  function handleNews(payload) {
+  function handleNews(payload, s) {
     if (!payload || typeof payload !== 'object') return;
-    if (!settings.enabled) return;
+    const cfg = s || DEFAULTS;
+    if (!cfg.enabled) return;
 
     const score = payload.score;
-    if (score == null || score < settings.minScore) return;
+    if (score == null || score < cfg.minScore) return;
 
     const coins = Array.isArray(payload.coins) ? payload.coins.filter(Boolean) : [];
-    if (coins.length === 0 && !settings.speakNoCoin) return;
+    if (coins.length === 0 && !cfg.speakNoCoin) return;
 
     // 去重
     const id = payload.id;
@@ -87,13 +65,14 @@
     lastStatus = { hooked: true, lastNews: payload.text ? String(payload.text).slice(0, 60) : null };
     reportStatus();
 
-    const speech = buildSignalSpeech(payload);
-    if (speech) enqueueSpeech(speech);
+    const speech = buildSignalSpeech(payload, cfg);
+    if (speech) enqueueSpeech(speech, cfg);
   }
 
   // 纯信号播报词：「消息源，多空，分数，品种」例：路透社，空，75分，原油
   // 无标的时改念标题：例：金十，空，75分，苹果主力合约日内大跌…
-  function buildSignalSpeech(payload) {
+  function buildSignalSpeech(payload, s) {
+    const cfg = s || DEFAULTS;
     const source = (window.CoinNames && CoinNames.sourceToZh)
       ? CoinNames.sourceToZh(payload.newsType, payload.source)
       : (payload.newsType || payload.source || '');
@@ -117,12 +96,12 @@
         if (!zh || seen.has(zh)) continue;
         seen.add(zh);
         names.push(zh);
-        if (names.length >= settings.maxCoins) break;
+        if (names.length >= cfg.maxCoins) break;
       }
       if (names.length) parts.push(names.join('、'));
     } else {
       // 无标的：优先从标题提取品种关键词，提取不到才念短标题
-      const items = extractCommodities(payload.text);
+      const items = extractCommodities(payload.text, cfg.maxCoins);
       if (items.length) parts.push(items.join('、'));
       else {
         const title = cleanTitle(payload.text, 15);
@@ -185,8 +164,9 @@
   ];
 
   // 从标题提取品种：按关键词出现位置排序、去重，最多 maxCoins 个
-  function extractCommodities(text) {
+  function extractCommodities(text, maxCoins) {
     if (!text) return [];
+    const limit = (maxCoins == null) ? 3 : maxCoins;
     const clean = cleanTitle(text, 0); // 不截断，保证扫描完整
     if (!clean) return [];
     const low = clean.toLowerCase(); // 英文大小写不敏感
@@ -202,7 +182,7 @@
       if (seen.has(name)) continue;
       seen.add(name);
       out.push(name);
-      if (out.length >= settings.maxCoins) break;
+      if (out.length >= limit) break;
     }
     return out;
   }
@@ -223,39 +203,17 @@
   }
 
   // ---------- 播放 ----------
-  function enqueueSpeech(text) {
+  function enqueueSpeech(text, s) {
     playChain = playChain
-      .then(() => playSpeech(text))
+      .then(() => playSpeech(text, s))
       .catch(() => {});
   }
 
-  // 从 storage 读最新语速/音量（绕过 settings 缓存，避免 RELOAD 同步失败导致"永远2倍"）
-  function getStoredAudio() {
-    return new Promise((resolve) => {
-      const fallback = { rate: 2.0, volume: 1.0 };
-      try {
-        if (!chrome.storage || !chrome.storage.local) {
-          resolve(fallback);
-          return;
-        }
-        chrome.storage.local.get(null, (res) => {
-          const stored = res || {};
-          resolve({
-            rate: Number(stored.rate) || 2.0,
-            volume: typeof stored.volume === 'number' ? stored.volume : 1.0
-          });
-        });
-      } catch (e) {
-        resolve(fallback);
-      }
-    });
-  }
-
-  async function playSpeech(text, overrideRate) {
+  async function playSpeech(text, s) {
     // 主引擎：浏览器内置 speechSynthesis（零延迟、无需联网）
-    const stored = await getStoredAudio();
-    const rate = overrideRate != null ? Number(overrideRate) : stored.rate;
-    const volume = stored.volume;
+    const cfg = s || DEFAULTS;
+    const rate = Number(cfg.rate) || 2.0;
+    const volume = typeof cfg.volume === 'number' ? cfg.volume : 1.0;
     const r = await speakWithSpeechSynthesis(text, rate, volume);
     if (r && r.ok) {
       return { ok: true, engine: 'speechSynthesis', rate, voice: r.voiceName, error: '' };
@@ -342,22 +300,20 @@
     if (!msg || msg.target !== 'offscreen') return false;
 
     if (msg.type === 'NEWS_SCORED') {
-      handleNews(msg.payload || {});
-      sendResponse({ ok: true });
-      return false;
-    }
-
-    if (msg.type === 'RELOAD_SETTINGS') {
-      loadSettings(() => {});
+      // settings 由 background 塞进消息（offscreen 可能没有 chrome.storage）
+      handleNews(msg.payload || {}, msg.settings || null);
       sendResponse({ ok: true });
       return false;
     }
 
     if (msg.type === 'TEST_SPEAK') {
       const text = String(msg.text || '测试播报成功');
-      // popup 把当前选的语速一并传过来，测试直接用它（不依赖 offscreen 缓存）
-      const rate = msg.rate != null ? Number(msg.rate) : null;
-      playSpeech(text, rate).then((result) => {
+      // popup 把当前选的语速/音量一并传过来，测试直接用它
+      const s = {
+        rate: msg.rate != null ? Number(msg.rate) : 2.0,
+        volume: msg.volume != null ? Number(msg.volume) : 1.0
+      };
+      playSpeech(text, s).then((result) => {
         sendResponse({ ok: true, result });
       }).catch((e) => {
         sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
@@ -374,6 +330,6 @@
   });
 
   // ---------- 启动 ----------
-  loadSettings(() => {});
+  // 设置由 background 通过消息传入，无需本地读 storage
   console.log('[NewsLiquid 高分播报] Offscreen 已加载（劫持模式）');
 })();

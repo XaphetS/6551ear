@@ -90,8 +90,9 @@
 
   els.testBtn.addEventListener('click', () => {
     const selRate = parseFloat(els.rate.value);
+    const selVolume = parseFloat(els.volume.value);
     setStatus('合成中…', false);
-    chrome.runtime.sendMessage({ type: 'TEST_SPEAK', text: '路透社，空，75分，原油', rate: selRate }, (resp) => {
+    chrome.runtime.sendMessage({ type: 'TEST_SPEAK', text: '路透社，空，75分，原油', rate: selRate, volume: selVolume }, (resp) => {
       if (chrome.runtime.lastError) { setStatus('❌ 后台无响应: ' + chrome.runtime.lastError.message, false); return; }
       if (resp && resp.ok && resp.result && resp.result.ok) {
         const used = resp.result.rate;

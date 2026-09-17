@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NewsLiquid 高分播报",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "劫持 NewsLiquid 页面推送，高分新闻实时语音播报：消息源 + 多空方向 + AI评分 + 关联品种中文名（浏览器内置语音，零延迟不联网）",
   "permissions": [
     "storage",

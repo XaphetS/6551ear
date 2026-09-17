@@ -11,6 +11,21 @@ let offscreenCreating = null;
 // 页面挂钩状态
 let pageState = { ready: false, href: null, lastSeen: 0 };
 
+// settings 缓存（offscreen 文档可能没有 chrome.storage，由 background 统一读写后塞进消息）
+let cachedSettings = null;
+function getCachedSettings() {
+  return new Promise((resolve) => {
+    if (cachedSettings) { resolve(cachedSettings); return; }
+    try {
+      if (!chrome.storage || !chrome.storage.local) { resolve({}); return; }
+      chrome.storage.local.get(null, (res) => {
+        cachedSettings = res || {};
+        resolve(cachedSettings);
+      });
+    } catch (e) { resolve({}); }
+  });
+}
+
 // 确保 offscreen 文档存在（AUDIO_PLAYBACK + BLOBS reason，常驻不被回收）
 async function ensureOffscreenDocument() {
   try {
@@ -51,8 +66,8 @@ async function ensureOffscreenDocument() {
   return true;
 }
 
-chrome.runtime.onInstalled.addListener(() => { ensureOffscreenDocument().catch(() => {}); });
-chrome.runtime.onStartup.addListener(() => { ensureOffscreenDocument().catch(() => {}); });
+chrome.runtime.onInstalled.addListener(() => { ensureOffscreenDocument().catch(() => {}); getCachedSettings(); });
+chrome.runtime.onStartup.addListener(() => { ensureOffscreenDocument().catch(() => {}); getCachedSettings(); });
 
 // 给 offscreen 发消息
 async function sendToOffscreen(msg) {
@@ -87,16 +102,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // popup → 写设置
   if (msg.type === 'SET_SETTINGS') {
     // 补上 schemaVersion，避免 popup 保存时丢失版本标记导致反复迁移
-    chrome.storage.local.set({ ...(msg.settings || {}), schemaVersion: 9 }, () => {
-      sendToOffscreen({ type: 'RELOAD_SETTINGS' }).then(() => sendResponse({ ok: true }));
-    });
+    const merged = { ...(msg.settings || {}), schemaVersion: 9 };
+    cachedSettings = merged;  // 更新缓存，供 NEWS_SCORED 转发时塞给 offscreen
+    try {
+      chrome.storage.local.set(merged, () => { sendResponse({ ok: true }); });
+    } catch (e) {
+      sendResponse({ ok: true });
+    }
     return true;
   }
 
   // popup → 测试播报
   if (msg.type === 'TEST_SPEAK') {
     ensureOffscreenDocument().then(() => {
-      sendToOffscreen({ type: 'TEST_SPEAK', text: msg.text || '测试播报成功', rate: msg.rate }).then(sendResponse);
+      sendToOffscreen({ type: 'TEST_SPEAK', text: msg.text || '测试播报成功', rate: msg.rate, volume: msg.volume }).then(sendResponse);
     }).catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
@@ -104,8 +123,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // content.js → 新闻推送（带 AI 评分），转发给 offscreen 播放
   if (msg.type === 'NEWS_SCORED') {
     sendResponse({ ok: true });
-    ensureOffscreenDocument().then(() => {
-      sendToOffscreen({ type: 'NEWS_SCORED', payload: msg.payload });
+    getCachedSettings().then((settings) => {
+      ensureOffscreenDocument().then(() => {
+        sendToOffscreen({ type: 'NEWS_SCORED', payload: msg.payload, settings });
+      }).catch(() => {});
     }).catch(() => {});
     return false;
   }
