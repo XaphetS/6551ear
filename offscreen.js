@@ -39,20 +39,30 @@
 
   // ---------- 设置 ----------
   function loadSettings(cb) {
-    chrome.storage.local.get(null, (res) => {
-      const stored = res || {};
-      // 版本迁移：旧扩展的 storage 里存着旧语速/旧音色，会覆盖新默认值。
-      // schemaVersion 不一致时，强制用最新默认值（保证 +100% 语速 + 晓臻音色生效）。
-      if (stored.schemaVersion !== DEFAULTS.schemaVersion) {
-        settings = { ...DEFAULTS };
-        // 写回完整新默认值（覆盖旧的 rate/voice 等），保证 popup 与播报一致
-        chrome.storage.local.set(settings);
-      } else {
-        settings = { ...DEFAULTS, ...stored };
-      }
-      if (typeof settings.volume !== 'number') settings.volume = 1.0;
+    // 部分 Chrome 的 offscreen 文档没有 chrome.storage（只有 chrome.runtime），加防护避免启动即崩
+    if (!chrome.storage || !chrome.storage.local) {
+      settings = { ...DEFAULTS };
       if (cb) cb();
-    });
+      return;
+    }
+    try {
+      chrome.storage.local.get(null, (res) => {
+        const stored = res || {};
+        // 版本迁移：旧扩展的 storage 里存着旧语速/旧音色，会覆盖新默认值。
+        // schemaVersion 不一致时，强制用最新默认值。
+        if (stored.schemaVersion !== DEFAULTS.schemaVersion) {
+          settings = { ...DEFAULTS };
+          try { chrome.storage.local.set(settings); } catch (e) {}
+        } else {
+          settings = { ...DEFAULTS, ...stored };
+        }
+        if (typeof settings.volume !== 'number') settings.volume = 1.0;
+        if (cb) cb();
+      });
+    } catch (e) {
+      settings = { ...DEFAULTS };
+      if (cb) cb();
+    }
   }
 
   // ---------- 新闻处理 ----------
@@ -222,13 +232,22 @@
   // 从 storage 读最新语速/音量（绕过 settings 缓存，避免 RELOAD 同步失败导致"永远2倍"）
   function getStoredAudio() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(null, (res) => {
-        const stored = res || {};
-        resolve({
-          rate: Number(stored.rate) || 2.0,
-          volume: typeof stored.volume === 'number' ? stored.volume : 1.0
+      const fallback = { rate: 2.0, volume: 1.0 };
+      try {
+        if (!chrome.storage || !chrome.storage.local) {
+          resolve(fallback);
+          return;
+        }
+        chrome.storage.local.get(null, (res) => {
+          const stored = res || {};
+          resolve({
+            rate: Number(stored.rate) || 2.0,
+            volume: typeof stored.volume === 'number' ? stored.volume : 1.0
+          });
         });
-      });
+      } catch (e) {
+        resolve(fallback);
+      }
     });
   }
 
